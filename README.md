@@ -6,7 +6,7 @@ A self-hosted notes logger for a Tesla/Grok workflow. It runs on a Cloudflare Wo
 
 - Save notes with unique IDs and timestamps
 - Read all notes, IDs only, timestamped logs, and monthly counts
-- Show recent notes as simple HTML for browser-based reading
+- Show recent notes as simple HTML for browser-based reading; the HTML view automatically refreshes every 10 seconds
 - Edit and delete notes by ID
 - Preview and apply retention trimming
 - Pair a browser once to save notes and read the log without putting the key in the URL
@@ -27,7 +27,7 @@ Each person should use their own Worker, KV namespace, and secrets. Never use so
 
 1. Open `YOUR_WORKER_URL/pair` in the browser you want to pair.
 2. Enter your `NOTE_KEY` once.
-3. After pairing, that browser can open `YOUR_WORKER_URL/` or `YOUR_WORKER_URL/log` to read notes. A browser normally receives the HTML view automatically; add `?format=html` to request it explicitly.
+3. After pairing, that browser can open `YOUR_WORKER_URL/` or `YOUR_WORKER_URL/log` to read notes. A browser normally receives the HTML view automatically; add `?format=html` to request it explicitly. The HTML view reloads every 10 seconds to show new or updated notes while it stays open.
 4. To save through the paired browser, open `YOUR_WORKER_URL/submit?note=URL_ENCODED_NOTE`. Add `&topic=URL_ENCODED_TOPIC` if desired.
 
 Pairing is stored in a secure, HTTP-only browser cookie. Keep the paired browser private. The session grants read access to the notes and the existing paired-browser save flow; edit, delete, and trim routes still require the note key.
