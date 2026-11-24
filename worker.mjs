@@ -116,12 +116,16 @@ async function listNotes(kv) {
 
 async function readNotes(kv, { includeIds = false } = {}) {
   const notes = await listNotes(kv);
-  const lines = notes.map(entry => {
+  // Newest first, matching the HTML view.
+  const ordered = [...notes].reverse();
+
+  const lines = ordered.map(entry => {
     if (includeIds) return `${entry.id}: ${entry.text}`;
     const prefix = entry.time ? `[${entry.time}] ` : "";
     const topic = entry.topic ? `[${entry.topic}] ` : "";
     return prefix + topic + entry.text;
   });
+
   return reply(lines.length ? lines.join("\n") + "\n" : "(empty)");
 }
 
@@ -265,7 +269,10 @@ async function readNotesHtml(kv, { limit = 20 } = {}) {
   <h1>Recent notes</h1>
   <main>${body}</main>
 </body>
-</html>`, 200, { "Content-Type": "text/html; charset=utf-8" });
+</html>`, 200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+  });
 }
 
 function pairPage() {
