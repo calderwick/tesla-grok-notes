@@ -218,6 +218,56 @@ async function hasCarSession(request, env) {
   return crypto.subtle.verify("HMAC", await sessionSigner(env), bytes, sessionMessage(expires, env));
 }
 
+async function isAuthorized(request, url, env) {
+  const key = accessKey(request, url);
+  if (key && key === env.NOTE_KEY) return true;
+  return await hasCarSession(request, env);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+async function readNotesHtml(kv, { limit = 20 } = {}) {
+  const notes = await listNotes(kv);
+  const recent = notes.slice(-limit).reverse();
+  const items = recent.map(note => {
+    const time = note.time ? note.time.slice(0, 16).replace("T", " ") : "";
+    const topic = note.topic ? `<p class="topic">${escapeHtml(note.topic)}</p>` : "";
+    const timestamp = time
+      ? `<time datetime="${escapeHtml(note.time)}">${escapeHtml(time)}</time>`
+      : "";
+    return `<article><h2>${escapeHtml(note.text)}</h2>${topic}${timestamp}<p class="id">ID: ${escapeHtml(note.id)}</p></article>`;
+  }).join("\n");
+
+  const body = recent.length ? items : "<p>(no notes yet)</p>";
+  return reply(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Recent notes</title>
+  <style>
+    body { max-width: 48rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; }
+    article { margin: 1rem 0; padding: 1rem; border: 1px solid #bbb; border-radius: .75rem; overflow-wrap: anywhere; }
+    h2 { margin: 0 0 .5rem; font-size: 1.1rem; font-weight: 500; white-space: pre-wrap; }
+    time, .topic, .id { color: #555; font-size: .9rem; }
+    .topic { margin: 0 0 .25rem; }
+    .id { margin: .25rem 0 0; }
+  </style>
+</head>
+<body>
+  <h1>Recent notes</h1>
+  <main>${body}</main>
+</body>
+</html>`, 200, { "Content-Type": "text/html; charset=utf-8" });
+}
+
 function pairPage() {
   return reply(`<!doctype html>
 <html lang="en">
@@ -407,7 +457,7 @@ const worker = {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
-    const authorized = Boolean(env.NOTE_KEY && accessKey(request, url) === env.NOTE_KEY);
+    const keyAuthorized = Boolean(env.NOTE_KEY && accessKey(request, url) === env.NOTE_KEY);
     const wantsJson = url.searchParams.get("format") === "json"
       || (request.headers.get("accept") ?? "").includes("application/json");
     try {
@@ -418,18 +468,19 @@ const worker = {
       }
       if (path === "/submit") {
         if (method !== "GET") return reply("Use GET.", 405, { Allow: "GET" });
-        if (authorized || await hasCarSession(request, env)) return submitPage();
+        if (keyAuthorized || await hasCarSession(request, env)) return submitPage();
         return reply("Pair this car browser first at /pair.", 401);
       }
 
       if (path === "/" && method === "POST") return await postNote(request, url, env, wantsJson ? "json" : "saved");
-      if (!authorized) return reply("unauthorized", 401);
 
       if (path === "/update") {
+        if (!keyAuthorized) return reply("unauthorized", 401);
         if (method !== "POST" && method !== "PATCH") return reply("Use POST or PATCH.", 405, { Allow: "POST, PATCH" });
         return await updateNote(env.LOG_KV, url);
       }
       if (path === "/delete") {
+        if (!keyAuthorized) return reply("unauthorized", 401);
         if (method !== "POST") return reply("Use POST.", 405, { Allow: "POST" });
         const body = await readBody(request);
         if (body === null) return reply("Request body is too large.", 413);
@@ -451,8 +502,18 @@ const worker = {
       }
 
       if (path === "/trim") {
+        if (!keyAuthorized) return reply("unauthorized", 401);
         if (method !== "GET" && method !== "POST") return reply("Use GET or POST.", 405, { Allow: "GET, POST" });
         return await trimNotes(request, env.LOG_KV, url);
+      }
+
+      const month = path.match(/^\/(\d{4})\/(0[1-9]|1[0-2])$/);
+      const isReadRoute = method === "GET" && (
+        path === "/ids" || path === "/log" || path === "/index" || Boolean(month) ||
+        (path === "/" && !url.searchParams.has("t") && !url.searchParams.has("text"))
+      );
+      if (isReadRoute && !await isAuthorized(request, url, env)) {
+        return reply("unauthorized", 401);
       }
 
       if (path === "/ids") {
@@ -461,10 +522,14 @@ const worker = {
         return reply(ids.length ? ids.join("\n") + "\n" : "(empty)");
       }
 
-      const month = path.match(/^\/(\d{4})\/(0[1-9]|1[0-2])$/);
       if (month || path === "/index" || path === "/log") {
         if (method !== "GET") return reply("Use GET.", 405, { Allow: "GET" });
-        if (path === "/log") return await readNotes(env.LOG_KV);
+        const wantsHtml = url.searchParams.get("format") === "html"
+          || (request.headers.get("accept") ?? "").includes("text/html");
+        if (path === "/log") {
+          if (wantsHtml) return await readNotesHtml(env.LOG_KV, { limit: 25 });
+          return await readNotes(env.LOG_KV);
+        }
         if (!month) return await readMonthIndex(env.LOG_KV);
         const prefix = `${month[1]}-${month[2]}-`;
         const entries = (await listNotes(env.LOG_KV)).filter(note => note.time?.startsWith(prefix));
@@ -477,10 +542,16 @@ const worker = {
       if (method === "POST" && note === null) return await postNote(request, url, env, responseFormat);
       if (method !== "GET" && method !== "POST") return reply("Use GET or POST.", 405, { Allow: "GET, POST" });
       if (note !== null && (path !== "/" || note)) {
+        if (!keyAuthorized) return reply("unauthorized", 401);
         return await saveNote(env.LOG_KV, note, MAX_GET_NOTE_BYTES, url.searchParams.get("topic") ?? "", responseFormat);
       }
       if (path === "/") {
-        return wantsJson ? await readMonthIndex(env.LOG_KV) : await readNotes(env.LOG_KV, { includeIds: true });
+        const wantsHtml = url.searchParams.get("format") === "html"
+          || (request.headers.get("accept") ?? "").includes("text/html");
+        if (wantsHtml) return await readNotesHtml(env.LOG_KV, { limit: 20 });
+        return wantsJson
+          ? await readMonthIndex(env.LOG_KV)
+          : await readNotes(env.LOG_KV, { includeIds: true });
       }
       return reply("Not found.", 404);
     } catch {
