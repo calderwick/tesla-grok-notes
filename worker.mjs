@@ -251,7 +251,7 @@ async function readNotesHtml(kv, { limit = 20 } = {}) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Recent notes</title>
+  <meta http-equiv="refresh" content="10">\n  <title>Recent notes</title>
   <style>
     body { max-width: 48rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; }
     article { margin: 1rem 0; padding: 1rem; border: 1px solid #bbb; border-radius: .75rem; overflow-wrap: anywhere; }
