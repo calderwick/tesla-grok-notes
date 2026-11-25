@@ -54,7 +54,9 @@ function reply(body, status = 200, headers = {}) {
     status,
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
-      "Cache-Control": "no-store",
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+      "Pragma": "no-cache",
+      "Expires": "0",
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff",
       "X-Robots-Tag": "noindex, nofollow",
@@ -111,17 +113,17 @@ async function listNotes(kv) {
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
 
-  return notes.reverse().sort((a, b) => (a.time ?? "").localeCompare(b.time ?? ""));
+  return notes.sort((a, b) => (b.time ?? "").localeCompare(a.time ?? ""));
 }
 
 async function readNotes(kv, { includeIds = false } = {}) {
   const notes = await listNotes(kv);
   // Newest first, matching the HTML view.
-  const ordered = [...notes].reverse();
+  const ordered = notes;
 
   const lines = ordered.map(entry => {
     if (includeIds) return `${entry.id}: ${entry.text}`;
-    const prefix = entry.time ? `[${entry.time}] ` : "";
+    const prefix = entry.time ? `[${formatDenverTime(entry.time)}] ` : "";
     const topic = entry.topic ? `[${entry.topic}] ` : "";
     return prefix + topic + entry.text;
   });
@@ -228,6 +230,20 @@ async function isAuthorized(request, url, env) {
   return await hasCarSession(request, env);
 }
 
+function formatDenverTime(value) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.valueOf())) return String(value ?? "");
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Denver",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(date);
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -239,14 +255,13 @@ function escapeHtml(value) {
 
 async function readNotesHtml(kv, { limit = 20 } = {}) {
   const notes = await listNotes(kv);
-  const recent = notes.slice(-limit).reverse();
+  const recent = notes.slice(0, limit);
   const items = recent.map(note => {
-    const time = note.time ? note.time.slice(0, 16).replace("T", " ") : "";
-    const topic = note.topic ? `<p class="topic">${escapeHtml(note.topic)}</p>` : "";
-    const timestamp = time
-      ? `<time datetime="${escapeHtml(note.time)}">${escapeHtml(time)}</time>`
+    const timestamp = note.time
+      ? `<time datetime="${escapeHtml(note.time)}">${escapeHtml(formatDenverTime(note.time))}</time>`
       : "";
-    return `<article><h2>${escapeHtml(note.text)}</h2>${topic}${timestamp}<p class="id">ID: ${escapeHtml(note.id)}</p></article>`;
+    const topic = note.topic ? `<p class="topic">${escapeHtml(note.topic)}</p>` : "";
+    return `<div class="note">${timestamp}${topic}<p class="body">${escapeHtml(note.text)}</p><p class="id">ID: ${escapeHtml(note.id)}</p></div>`;
   }).join("\n");
 
   const body = recent.length ? items : "<p>(no notes yet)</p>";
@@ -258,10 +273,10 @@ async function readNotesHtml(kv, { limit = 20 } = {}) {
   <meta http-equiv="refresh" content="10">\n  <title>Recent notes</title>
   <style>
     body { max-width: 48rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; }
-    article { margin: 1rem 0; padding: 1rem; border: 1px solid #bbb; border-radius: .75rem; overflow-wrap: anywhere; }
-    h2 { margin: 0 0 .5rem; font-size: 1.1rem; font-weight: 500; white-space: pre-wrap; }
+    .note { margin: 1rem 0; padding: 1rem; border: 1px solid #bbb; border-radius: .75rem; overflow-wrap: anywhere; }
+    .body { margin: .5rem 0; white-space: pre-wrap; }
     time, .topic, .id { color: #555; font-size: .9rem; }
-    .topic { margin: 0 0 .25rem; }
+    .topic { margin: .25rem 0; }
     .id { margin: .25rem 0 0; }
   </style>
 </head>
@@ -411,14 +426,39 @@ async function saveNote(kv, note, maxBytes, topic = "", responseFormat = "saved"
   const label = topic.trim();
 
   const now = new Date();
-  // KV lists keys alphabetically. Reverse the timestamp for newest first.
+  const cleanNote = note.trim();
+  if (!cleanNote) return reply("Provide a non-empty note.", 400);
+  if (new TextEncoder().encode(cleanNote).byteLength > maxBytes) {
+    return reply(`Note is too long. Limit: ${maxBytes} bytes.`, 413);
+  }
+
+  // Ignore immediate exact retries from voice shortcuts or browser submission.
+  const recentKeys = await kv.list({ prefix: NOTE_PREFIX, limit: 20 });
+  const recentValues = recentKeys.keys.length
+    ? await kv.get(recentKeys.keys.map(({ name }) => name), "json")
+    : new Map();
+  const duplicate = recentKeys.keys
+    .map(({ name }) => storedNote(recentValues.get(name), name))
+    .find(entry => entry.text?.trim() === cleanNote
+      && (entry.topic ?? "") === label
+      && Number.isFinite(Date.parse(entry.time))
+      && now.getTime() - Date.parse(entry.time) >= 0
+      && now.getTime() - Date.parse(entry.time) <= 10_000);
+  if (duplicate) {
+    const receipt = `${duplicate.text}\nID: ${duplicate.id}`;
+    if (responseFormat === "saved") return reply("saved");
+    if (responseFormat === "notes") return reply(receipt);
+    return jsonReply({ ...publicNote(duplicate), receipt, deduplicated: true });
+  }
+
+  // KV sorts keys alphabetically. Reverse the timestamp to put newest first.
   const order = String(NOTE_KEY_TIME_BASE - now.getTime()).padStart(13, "0");
   const id = crypto.randomUUID();
   const entryKey = `${NOTE_PREFIX}${order}:${id}`;
-  const entry = { id, time: now.toISOString(), text: note, ...(label ? { topic: label } : {}) };
+  const entry = { id, time: now.toISOString(), text: cleanNote, ...(label ? { topic: label } : {}) };
   await kv.put(entryKey, JSON.stringify(entry));
   if (responseFormat === "saved") return reply("saved");
-  const receipt = `${note}\nID: ${id}`;
+  const receipt = `${cleanNote}\nID: ${id}`;
   if (responseFormat === "notes") return reply(receipt, 201);
   return jsonReply({ ...publicNote(entry), receipt }, 201);
 }
@@ -479,6 +519,16 @@ const worker = {
         return reply("Pair this car browser first at /pair.", 401);
       }
 
+      if (path === "/read") {
+        if (method !== "GET") return reply("Use GET.", 405, { Allow: "GET" });
+        if (!await isAuthorized(request, url, env)) return reply("unauthorized", 401);
+        const wantsHtml = url.searchParams.get("format") === "html"
+          || (request.headers.get("accept") ?? "").includes("text/html");
+        return wantsHtml
+          ? await readNotesHtml(env.LOG_KV, { limit: 100 })
+          : await readNotes(env.LOG_KV, { includeIds: true });
+      }
+
       if (path === "/" && method === "POST") return await postNote(request, url, env, wantsJson ? "json" : "saved");
 
       if (path === "/update") {
@@ -516,7 +566,7 @@ const worker = {
 
       const month = path.match(/^\/(\d{4})\/(0[1-9]|1[0-2])$/);
       const isReadRoute = method === "GET" && (
-        path === "/ids" || path === "/log" || path === "/index" || Boolean(month) ||
+        path === "/read" || path === "/ids" || path === "/log" || path === "/index" || Boolean(month) ||
         (path === "/" && !url.searchParams.has("t") && !url.searchParams.has("text"))
       );
       if (isReadRoute && !await isAuthorized(request, url, env)) {
