@@ -55,8 +55,11 @@ function reply(body, status = 200, headers = {}) {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0",
+      "CDN-Cache-Control": "no-store",
+      "Cloudflare-CDN-Cache-Control": "no-store",
       "Pragma": "no-cache",
       "Expires": "0",
+      "Vary": "Accept",
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff",
       "X-Robots-Tag": "noindex, nofollow",
@@ -253,9 +256,12 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
-async function readNotesHtml(kv, { limit = 20 } = {}) {
+async function readNotesHtml(kv, { limit = 20, requestUrl } = {}) {
   const notes = await listNotes(kv);
   const recent = notes.slice(0, limit);
+  const refreshUrl = new URL(requestUrl);
+  refreshUrl.searchParams.set("v", String(Date.now()));
+  const refreshTarget = `${refreshUrl.pathname}${refreshUrl.search}`;
   const items = recent.map(note => {
     const timestamp = note.time
       ? `<time datetime="${escapeHtml(note.time)}">${escapeHtml(formatDenverTime(note.time))}</time>`
@@ -270,7 +276,7 @@ async function readNotesHtml(kv, { limit = 20 } = {}) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="refresh" content="10">\n  <title>Recent notes</title>
+  <meta http-equiv="refresh" content="10;url=${escapeHtml(refreshTarget)}">
   <style>
     body { max-width: 48rem; margin: 2rem auto; padding: 0 1rem; font: 1rem/1.5 system-ui, sans-serif; }
     .note { margin: 1rem 0; padding: 1rem; border: 1px solid #bbb; border-radius: .75rem; overflow-wrap: anywhere; }
@@ -282,6 +288,7 @@ async function readNotesHtml(kv, { limit = 20 } = {}) {
 </head>
 <body>
   <h1>Recent notes</h1>
+  <p><a href="${escapeHtml(refreshTarget)}">Refresh now</a></p>
   <main>${body}</main>
 </body>
 </html>`, 200, {
@@ -375,7 +382,7 @@ function submitPage() {
 
     try {
       history.replaceState(null, "", location.pathname);
-      const response = await fetch("/", { method: "POST", body: fields, credentials: "same-origin" });
+      const response = await fetch("/", { method: "POST", body: fields, credentials: "same-origin", cache: "no-store" });
       const message = await response.text();
       if (!response.ok || message !== "saved") {
         throw new Error(response.ok ? "The server did not confirm the save." : message || "The request failed.");
@@ -525,7 +532,7 @@ const worker = {
         const wantsHtml = url.searchParams.get("format") === "html"
           || (request.headers.get("accept") ?? "").includes("text/html");
         return wantsHtml
-          ? await readNotesHtml(env.LOG_KV, { limit: 100 })
+          ? await readNotesHtml(env.LOG_KV, { limit: 100, requestUrl: url })
           : await readNotes(env.LOG_KV, { includeIds: true });
       }
 
@@ -584,7 +591,7 @@ const worker = {
         const wantsHtml = url.searchParams.get("format") === "html"
           || (request.headers.get("accept") ?? "").includes("text/html");
         if (path === "/log") {
-          if (wantsHtml) return await readNotesHtml(env.LOG_KV, { limit: 25 });
+          if (wantsHtml) return await readNotesHtml(env.LOG_KV, { limit: 25, requestUrl: url });
           return await readNotes(env.LOG_KV);
         }
         if (!month) return await readMonthIndex(env.LOG_KV);
@@ -605,7 +612,7 @@ const worker = {
       if (path === "/") {
         const wantsHtml = url.searchParams.get("format") === "html"
           || (request.headers.get("accept") ?? "").includes("text/html");
-        if (wantsHtml) return await readNotesHtml(env.LOG_KV, { limit: 20 });
+        if (wantsHtml) return await readNotesHtml(env.LOG_KV, { limit: 20, requestUrl: url });
         return wantsJson
           ? await readMonthIndex(env.LOG_KV)
           : await readNotes(env.LOG_KV, { includeIds: true });
@@ -618,3 +625,4 @@ const worker = {
 };
 
 export default worker;
+
