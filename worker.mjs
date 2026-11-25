@@ -445,7 +445,7 @@ async function saveNote(kv, note, maxBytes, topic = "", responseFormat = "saved"
       && now.getTime() - Date.parse(entry.time) >= 0
       && now.getTime() - Date.parse(entry.time) <= 10_000);
   if (duplicate) {
-    const receipt = `${duplicate.text}\\nID: ${duplicate.id}`;
+    const receipt = `${duplicate.text}\nID: ${duplicate.id}`;
     if (responseFormat === "saved") return reply("saved");
     if (responseFormat === "notes") return reply(receipt);
     return jsonReply({ ...publicNote(duplicate), receipt, deduplicated: true });
