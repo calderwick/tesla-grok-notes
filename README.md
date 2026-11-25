@@ -43,6 +43,7 @@ Anyone with the note key can read, add, edit, and delete notes. Do not share you
 | Route | Purpose |
 | --- | --- |
 | `/` | Read IDs and note text; HTML when requested by a browser |
+| `/read` | Read-only view; HTML when requested by a browser |
 | `/ids` | Read IDs only |
 | `/log` | Read timestamped notes; HTML when requested by a browser |
 | `/index` | Counts by month |
